@@ -599,12 +599,12 @@ def send_whatsapp(job: dict) -> bool:
         return False
 
     body = (
-        f"🚀 *New Job Alert*\n"
+        f"*New Job Alert*\n"
         f"*{job['title']}*\n"
-        f"🏢 {job['company']}\n"
-        f"📍 {job.get('location') or 'Location not listed'}\n"
-        f"📋 Source: {job['source']}\n"
-        f"🔗 {job['url']}"
+        f"Company: {job['company']}\n"
+        f"Location: {job.get('location') or 'Location not listed'}\n"
+        f"Source: {job['source']}\n"
+        f"Link: {job['url']}"
     )
 
     try:
@@ -629,7 +629,7 @@ def send_email(job: dict) -> bool:
     subject = f"[Job Alert] {job['title']} @ {job['company']}"
     html = f"""
 <html><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px;">
-  <h2 style="color:#4f46e5;">🚀 New Job Match!</h2>
+  <h2 style="color:#4f46e5;">New Job Match!</h2>
   <table style="border-collapse:collapse;width:100%;">
     <tr><td style="padding:8px;font-weight:bold;width:120px;">Role</td>
         <td style="padding:8px;">{job['title']}</td></tr>
@@ -679,15 +679,84 @@ def send_email(job: dict) -> bool:
 # ═════════════════════════════════════════════
 # MAIN
 # ═════════════════════════════════════════════
+def send_combined_email(jobs: list[dict]) -> bool:
+    if not all([SMTP_USER, SMTP_PASSWORD, EMAIL_TO]):
+        log.warning("SMTP creds missing — skipping combined email")
+        return False
 
+    count = len(jobs)
+    subject = f"[Job Alert] {count} New Job{'s' if count > 1 else ''} Found"
+
+    # Build one row per job
+    rows = ""
+    for i, job in enumerate(jobs):
+        bg = "#f9fafb" if i % 2 == 0 else "#ffffff"
+        rows += f"""
+        <tr style="background:{bg};">
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;">
+                <strong>{job['title']}</strong><br>
+                <span style="color:#6b7280;font-size:13px;">{job['company']}</span>
+            </td>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;font-size:13px;">
+                {job.get('location') or 'Not listed'}
+            </td>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;font-size:13px;">
+                {job['source']}
+            </td>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;">
+                <a href="{job['url']}"
+                   style="background:#4f46e5;color:#fff;padding:6px 12px;
+                          border-radius:5px;text-decoration:none;font-size:13px;">
+                    Apply
+                </a>
+            </td>
+        </tr>"""
+
+    html = f"""
+<html><body style="font-family:Arial,sans-serif;max-width:800px;margin:auto;padding:20px;">
+  <h2 style="color:#4f46e5;">{count} New Job Match{'es' if count > 1 else ''}!</h2>
+  <p style="color:#6b7280;">Found during the {datetime.now(PST).strftime('%A %b %d, %I:%M %p')} PST scan</p>
+  <table style="width:100%;border-collapse:collapse;margin-top:16px;">
+    <thead>
+      <tr style="background:#4f46e5;color:#fff;">
+        <th style="padding:10px;text-align:left;">Role & Company</th>
+        <th style="padding:10px;text-align:left;">Location</th>
+        <th style="padding:10px;text-align:left;">Source</th>
+        <th style="padding:10px;text-align:left;">Link</th>
+      </tr>
+    </thead>
+    <tbody>{rows}</tbody>
+  </table>
+  <p style="color:#6b7280;font-size:12px;margin-top:24px;">
+    Bay Area Job Monitor • {datetime.now(PST).strftime('%Y-%m-%d %H:%M %Z')}
+  </p>
+</body></html>
+"""
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = SMTP_USER
+    msg["To"]      = EMAIL_TO
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as srv:
+            srv.ehlo()
+            srv.starttls()
+            srv.login(SMTP_USER, SMTP_PASSWORD)
+            srv.sendmail(SMTP_USER, EMAIL_TO, msg.as_string())
+        log.info("Combined email sent: %d jobs", count)
+        return True
+    except Exception as e:
+        log.error("Combined email failed: %s", e)
+        return False
 def run() -> None:
     _print_budget_estimate()
 
     conn = init_database()
 
     # Gate on schedule BEFORE doing any network requests
-    #if not should_run_now(conn):
-    if False:
+    if not should_run_now(conn):
         log.info("Not in an active scheduling window — exiting early.")
         conn.close()
         sys.exit(0)
@@ -705,25 +774,46 @@ def run() -> None:
 
     # Deduplicate, notify, persist
     new_count = 0
+    new_jobs = []
+
     for job in all_jobs:
         if is_seen(conn, job["id"]):
             log.debug("Already seen: %s @ %s", job["title"], job["company"])
             continue
-
         log.info("NEW: %s @ %s [%s]", job["title"], job["company"], job["source"])
-        wa_ok    = send_whatsapp(job)
-        email_ok = send_email(job)
+        new_jobs.append(job)
 
-        if wa_ok or email_ok:   # only mark seen if at least one notification went out
+    if new_jobs:
+        # Send ONE combined email for all new jobs
+        email_ok = send_combined_email(new_jobs)
+
+        # Send individual WhatsApp per job (short message, not spammy)
+        for job in new_jobs:
+            send_whatsapp(job)
             mark_seen(conn, job)
             new_count += 1
-            time.sleep(1)       # Twilio rate-limit buffer
+            time.sleep(1)
+    else:
+        log.info("No new jobs found this run.")
+    
+    
+    
+    
 
-    log.info("Run complete — %d new job(s) notified.", new_count)
+    
+    
+    
 
-    # Update learned schedule weights
-    learn_and_adjust_schedule(conn)
-    conn.close()
+    
+    
+    
+    
+
+    
+
+    
+    
+    
 
 
 if __name__ == "__main__":
