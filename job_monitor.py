@@ -26,6 +26,8 @@ import re
 import requests
 from bs4 import BeautifulSoup
 from twilio.rest import Client as TwilioClient
+from dotenv import load_dotenv
+load_dotenv()
 
 # ─────────────────────────────────────────────
 # Logging
@@ -684,7 +686,8 @@ def run() -> None:
     conn = init_database()
 
     # Gate on schedule BEFORE doing any network requests
-    if not should_run_now(conn):
+    #if not should_run_now(conn):
+    if False:
         log.info("Not in an active scheduling window — exiting early.")
         conn.close()
         sys.exit(0)
