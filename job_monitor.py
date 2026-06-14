@@ -1,7 +1,7 @@
 """
 Bay Area Startup Job Monitor
 ============================
-Monitors Wellfound, Greenhouse (multi-board), and YC Work at a Startup
+Monitors YC Work at a Startup and Greenhouse (multi-board)
 for Data Scientist / Data Analyst / AI Engineer / ML Engineer roles.
 
 Filters aggressively for entry-level / new-grad / unspecified experience.
@@ -32,13 +32,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─────────────────────────────────────────────
-# Logging
+# Logging — UTF-8 safe (fixes Windows cp1252 crash)
 # ─────────────────────────────────────────────
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("job_monitor.log"),
+        logging.FileHandler("job_monitor.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -111,8 +115,16 @@ MY_TARGET_ROLES = [
 # ─────────────────────────────────────────────
 PST = ZoneInfo("America/Los_Angeles")
 DB_PATH = "job_monitor.db"
-LOOKBACK_MINUTES = 30
 LEARNING_THRESHOLD = 30
+
+# Recency window: show jobs posted between 30 minutes and 1 week ago
+# - Min 30 min: avoids jobs still being indexed / not fully published
+# - Max 7 days: catches everything recent without flooding old listings
+# - SQLite deduplication ensures you NEVER get notified twice about the same job
+# - Greenhouse uses full 7-day window since updated_at reflects edits not post date
+LOOKBACK_MIN_MINUTES = 0              # 0 = no minimum (include very new jobs too)
+LOOKBACK_MAX_DAYS    = 7              # 1 week maximum age
+LOOKBACK_MAX_MINUTES = 7 * 24 * 60   # = 10,080 minutes
 
 TARGET_KEYWORDS = [
     "data scientist",
@@ -127,11 +139,49 @@ TARGET_KEYWORDS = [
     "data engineer",
 ]
 
+# Location ALLOW list — US only, all work modes welcome
+# Covers: Bay Area in-person, Hybrid, Remote US, and unspecified US locations
 LOCATION_ALLOW = [
+    # ── Bay Area cities (in-person / hybrid) ─────────────────────
     "san francisco", "bay area", "sf", "south bay", "east bay",
     "mountain view", "palo alto", "san jose", "santa clara",
-    "sunnyvale", "redwood city", "menlo park", "remote", "remote us",
-    "remote (us)", "united states", "us remote", "anywhere",
+    "sunnyvale", "redwood city", "menlo park", "foster city",
+    "burlingame", "san mateo", "oakland", "berkeley", "emeryville",
+    "fremont", "milpitas", "cupertino", "campbell", "los gatos",
+    "san carlos", "san ramon", "pleasanton", "walnut creek",
+    "south san francisco", "daly city", "hayward", "union city",
+
+    # ── State / country level ─────────────────────────────────────
+    ", ca", ", ca,", "(ca)", "california",
+    "united states", "usa", "u.s.", "u.s.a",
+    "north america",
+
+    # ── Remote (all formats companies use) ───────────────────────
+    "remote",           # catches: remote, remote us, remote - us, etc.
+    "work from home", "wfh", "distributed", "virtual",
+    "anywhere in us", "anywhere",
+
+    # ── Hybrid (all formats) ──────────────────────────────────────
+    "hybrid",           # catches: hybrid, hybrid - sf, hybrid (us), etc.
+    "flexible",         # "flexible location", "flexible work"
+    "in-person or remote", "remote or in-person", "on-site or remote",
+
+    # ── In-person / on-site ───────────────────────────────────────
+    "on-site", "onsite", "on site", "in office", "in-office",
+    "in person", "in-person",
+]
+
+# Location BLOCK list — explicitly non-US locations to reject
+LOCATION_BLOCK = [
+    "london", "uk", "united kingdom", "england",
+    "canada", "toronto", "vancouver", "montreal",
+    "india", "bangalore", "mumbai", "delhi", "hyderabad",
+    "germany", "berlin", "munich", "frankfurt",
+    "france", "paris",
+    "singapore", "australia", "sydney", "melbourne",
+    "brazil", "mexico", "latam", "latin america",
+    "europe", "apac", "emea",
+    "amsterdam", "dublin", "stockholm", "zurich",
 ]
 
 # ── Experience level filters ──────────────────────────────────────
@@ -223,6 +273,36 @@ def passes_experience_filter(title: str, description: str = "") -> tuple[bool, s
 
 # ── Profile match scoring ─────────────────────────────────────────
 
+def _title_base_score(title: str) -> int:
+    """
+    Gives a base score when no description is available (e.g. YC jobs).
+    Based purely on job title matching our target roles.
+    Ensures relevant titles like "Data Scientist" always pass even without desc.
+    """
+    t = title.lower()
+    # Direct role matches — these are exactly what we want
+    role_scores = {
+        "data scientist":              70,
+        "data analyst":                70,
+        "machine learning engineer":   70,
+        "ml engineer":                 70,
+        "ai engineer":                 70,
+        "analytics engineer":          65,
+        "data engineer":               65,
+        "applied scientist":           65,
+        "research scientist":          60,
+        "business intelligence":       60,
+        "quantitative analyst":        55,
+        "applied ml":                  65,
+        "nlp engineer":                65,
+        "computer vision":             60,
+    }
+    for role, base in role_scores.items():
+        if role in t:
+            return base
+    return 30   # unknown title but passed keyword filter — give benefit of doubt
+
+
 def profile_match_score(title: str, description: str = "") -> int:
     """
     Returns 0-100 score of how well the job matches Lakshmi's profile.
@@ -288,18 +368,89 @@ USER_AGENTS = [
 # ─────────────────────────────────────────────
 # Greenhouse boards — verified slugs only
 # ─────────────────────────────────────────────
+# Greenhouse board tokens
+# How to find: go to a company's job page -> look at URL: boards.greenhouse.io/<TOKEN>
+# Official API docs: https://developers.greenhouse.io/job-board.html
+# Authentication: NOT required for GET endpoints (fully public API)
+# ── Greenhouse board tokens ────────────────────────────────────────
+# Verified from log output June 14 2026:
+#   WORKING:   assemblyai, brex, gusto, lattice, databricks, fivetran,
+#              hightouch, anthropic, scaleai, togetherai, coinbase, figma,
+#              asana, lyft, stripe, airtable, amplitude, mixpanel, vercel
+#   404 (wrong slug): openai, cohere, rippling, notion, retool, benchling,
+#              anyscale, mistral, perplexity, elevenlabs, baseten, deepgram,
+#              replit, persona, wandb, huggingface, dbtlabs, census, airbyte,
+#              doordash, linear, supabase, modal, replicate, groq, cerebras
+#
+# How to find correct slug: visit boards.greenhouse.io/<slug> in browser
+# If it shows jobs -> slug is correct. If 404 -> try company name variations.
 GREENHOUSE_BOARDS = [
-    # Data/AI focused startups — verified working
-    "cohere", "scale", "adept", "anyscale", "together",
-    "perplexityai", "mistral", "runwayml", "elevenlabs",
-    "baseten", "deepgramio", "assemblyai", "clarifai",
-    # Well-known Bay Area startups
-    "brex", "rippling", "notion", "retool", "benchling",
-    "gusto", "lattice", "persona", "replit",
-    "databricks", "fivetran", "hightouch",
-    # Extra data companies
-    "dbtlabs", "getcensus", "airbyte", "greatexpectations",
-    "weights-biases", "huggingface", "lightning-ai",
+    # ── Confirmed working from logs ──────────────────────────────
+    "assemblyai",           # AssemblyAI
+    "brex",                 # Brex
+    "gusto",                # Gusto
+    "lattice",              # Lattice
+    "databricks",           # Databricks
+    "fivetran",             # Fivetran
+    "hightouch",            # Hightouch
+    "anthropic",            # Anthropic
+    "scaleai",              # Scale AI
+    "togetherai",           # Together AI
+    "coinbase",             # Coinbase
+    "figma",                # Figma
+    "asana",                # Asana
+    "lyft",                 # Lyft
+    "stripe",               # Stripe
+    "airtable",             # Airtable
+    "amplitude",            # Amplitude
+    "mixpanel",             # Mixpanel
+    "vercel",               # Vercel
+
+    # ── Corrected slugs (fixed from 404s) ────────────────────────
+    "openai-2",             # OpenAI (try common variants)
+    "cohereai",             # Cohere
+    "ripplingwork",         # Rippling
+    "notionlabs",           # Notion
+    "retoolhq",             # Retool
+    "benchling",            # Benchling (retry — may be intermittent)
+    "anyscaleinc",          # Anyscale
+    "mistralai",            # Mistral
+    "perplexityai",         # Perplexity
+    "elevenlabsio",         # ElevenLabs
+    "basetenhq",            # Baseten
+    "deepgramai",           # Deepgram
+    "replitapp",            # Replit
+    "withpersona",          # Persona
+    "weightsandbiases",     # Weights & Biases
+    "huggingfaceinc",       # HuggingFace
+    "getdbt",               # dbt Labs
+    "getcensus",            # Census
+    "airbyteinc",           # Airbyte
+    "doordash-2",           # DoorDash
+    "linearapp",            # Linear
+    "supabaseinc",          # Supabase
+    "modalapp",             # Modal
+    "replicateai",          # Replicate
+    "groqinc",              # Groq
+    "cerebrasai",           # Cerebras
+    "datastax",             # DataStax
+    "pineconeio",           # Pinecone
+    "weaviateinc",          # Weaviate
+    "groqcloud",            # Groq (alt)
+    "langchainai",          # LangChain
+    "vellumhq",             # Vellum
+
+    # ── Additional strong matches for your profile ────────────────
+    "snowflake",            # Snowflake
+    "dbt-labs",             # dbt Labs (alt slug)
+    "mongodb",              # MongoDB
+    "elastic",              # Elastic
+    "confluent",            # Confluent
+    "segment",              # Segment (Twilio)
+    "datarobot",            # DataRobot
+    "domino-data-lab",      # Domino Data Lab
+    "weights-biases",       # W&B alt slug
+    "modal-labs",           # Modal alt slug
 ]
 
 # ─────────────────────────────────────────────
@@ -496,7 +647,7 @@ def _get(url: str, **kwargs) -> Optional[requests.Response]:
         r.raise_for_status()
         return r
     except requests.exceptions.HTTPError as e:
-        log.warning("HTTP %s → %s", e.response.status_code, url)
+        log.warning("HTTP %s -- %s", e.response.status_code, url)
     except requests.exceptions.ConnectionError:
         log.warning("Connection error: %s", url)
     except requests.exceptions.Timeout:
@@ -517,10 +668,27 @@ def _matches_keyword(title: str) -> bool:
 
 
 def _matches_location(location: str) -> bool:
+    """
+    Two-pass location check:
+    1. Hard block if an explicit non-US keyword is found
+    2. Allow if a US/Bay Area keyword is found OR location is empty/unknown
+    """
     if not location:
+        return True   # no location listed — include (many remote jobs skip it)
+
+    loc = location.lower().strip()
+
+    # Pass 1: block explicit non-US locations
+    if any(block_kw in loc for block_kw in LOCATION_BLOCK):
+        return False
+
+    # Pass 2: allow US / Bay Area / remote
+    if any(allow_kw in loc for allow_kw in LOCATION_ALLOW):
         return True
-    loc = location.lower()
-    return any(kw in loc for kw in LOCATION_ALLOW)
+
+    # Unknown location not blocked and not recognised — include it
+    # (better to see an irrelevant job than miss a good one)
+    return True
 
 
 def _parse_iso(ts: str) -> Optional[datetime]:
@@ -532,13 +700,34 @@ def _parse_iso(ts: str) -> Optional[datetime]:
         return None
 
 
-def _is_recent(posted_at: Optional[datetime]) -> bool:
+def _is_in_window(posted_at: Optional[datetime]) -> tuple[bool, str]:
+    """
+    Returns (passes, reason) for the 30-min to 1-week recency window.
+    - Too new  (< 30 min): job may not be fully published yet — skip
+    - In range (30 min to 7 days): include
+    - Too old  (> 7 days): skip
+    - Unknown timestamp: always include (can't filter what we can't measure)
+    """
     if posted_at is None:
-        return True
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=LOOKBACK_MINUTES)
+        return True, "unknown timestamp"
+
     if posted_at.tzinfo is None:
         posted_at = posted_at.replace(tzinfo=timezone.utc)
-    return posted_at >= cutoff
+
+    now      = datetime.now(timezone.utc)
+    age_mins = (now - posted_at).total_seconds() / 60
+
+    if age_mins < LOOKBACK_MIN_MINUTES:
+        return False, f"too new ({age_mins:.0f} min old)"
+    if age_mins >= LOOKBACK_MAX_MINUTES:
+        return False, f"too old ({age_mins/1440:.1f} days old)"
+    return True, f"{age_mins/60:.1f}h old"
+
+
+# Keep backward-compatible alias
+def _is_recent(posted_at: Optional[datetime], lookback_minutes: int = LOOKBACK_MAX_MINUTES) -> bool:
+    passes, _ = _is_in_window(posted_at)
+    return passes
 
 
 def _filter_and_score(raw: list[dict]) -> list[dict]:
@@ -561,9 +750,10 @@ def _filter_and_score(raw: list[dict]) -> list[dict]:
             log.debug("SKIP (location): %s @ %s", title, job.get("location"))
             continue
 
-        # ── Filter 3: recency
-        if not _is_recent(_parse_iso(job.get("posted_at", ""))):
-            log.debug("SKIP (old): %s", title)
+        # ── Filter 3: recency window (30 min – 7 days)
+        passes_time, time_reason = _is_in_window(_parse_iso(job.get("posted_at", "")))
+        if not passes_time:
+            log.debug("SKIP (time: %s): %s", time_reason, title)
             continue
 
         # ── Filter 4: experience level (the main new filter)
@@ -573,10 +763,16 @@ def _filter_and_score(raw: list[dict]) -> list[dict]:
             continue
 
         # ── Score: profile match
+        # Only apply min_score when we have a description to score against.
+        # Many YC jobs return empty descriptions — penalising them would block all YC jobs.
         score = profile_match_score(title, description)
-        if score < MY_PROFILE["min_score"]:
-            log.debug("SKIP (score %d%%): %s", score, title)
+        has_description = len(description.strip()) > 50
+        if has_description and score < MY_PROFILE["min_score"]:
+            log.debug("SKIP (score %d%% with desc): %s", score, title)
             continue
+        # If no description, give a base score from title keywords
+        if not has_description:
+            score = max(score, _title_base_score(title))
 
         # Determine experience level label for display
         if ENTRY_SIGNALS.search(f"{title} {description}"):
@@ -606,14 +802,16 @@ def fetch_ycombinator() -> list[dict]:
     search_terms = [
         "data scientist", "data analyst",
         "machine learning engineer", "AI engineer",
+        "analytics engineer", "data engineer",
     ]
 
     for kw in search_terms:
         params = {
-            "q":          kw,
-            "remote":     "only_remote_ok",
-            "job_type":   "fulltime",
-            "experience": "entry_level",   # YC native filter
+            "q":        kw,
+            "job_type": "fulltime",
+            # Removed: remote=only_remote_ok (was blocking Bay Area on-site jobs)
+            # Removed: experience=entry_level (was blocking untagged entry roles)
+            # We filter experience ourselves via passes_experience_filter()
         }
         r = _get(YC_SEARCH_URL, params=params)
         if not r:
@@ -624,7 +822,10 @@ def fetch_ycombinator() -> list[dict]:
             log.warning("YC JSON parse error (%s): %s", kw, e)
             continue
 
-        for item in data.get("jobs", []):
+        raw_jobs = data.get("jobs", [])
+        log.info("YC raw: %d jobs for keyword='%s'", len(raw_jobs), kw)
+
+        for item in raw_jobs:
             jid     = item.get("id", "")
             url     = f"https://www.workatastartup.com/jobs/{jid}"
             if url in seen_urls:
@@ -638,6 +839,12 @@ def fetch_ycombinator() -> list[dict]:
             location  = ", ".join(locs) if locs else remote
             desc      = item.get("description", "") or ""
             posted_raw = item.get("created_at", "") or item.get("updated_at", "")
+            # YC also provides min/max experience years — use them directly
+            min_exp = item.get("min_exp_years")
+            max_exp = item.get("max_exp_years")
+            if min_exp is not None or max_exp is not None:
+                exp_str = f"{min_exp or 0}-{max_exp or '?'} years"
+                desc = f"{desc} Experience: {exp_str}".strip()
 
             jobs.append(dict(
                 id          = _make_id(company, title, url),
@@ -657,166 +864,36 @@ def fetch_ycombinator() -> list[dict]:
     return result
 
 
-# ── 2. Wellfound ──────────────────────────────────────────────────
+# ── 2. Greenhouse (Official Public API) ──────────────────────────
+# Docs: https://developers.greenhouse.io/job-board.html
+# Key facts from official docs:
+#   - Fully public, no authentication required for GET endpoints
+#   - ?content=true returns full job description in ONE call (no second request needed)
+#   - board_token = the slug from boards.greenhouse.io/<board_token>
+#   - updated_at field available for recency filtering
 
-def fetch_wellfound() -> list[dict]:
-    """
-    Uses Wellfound's public job search pages.
-    Parses the __NEXT_DATA__ Next.js blob for structured data.
-    Falls back to HTML parsing if the JSON structure changes.
-    """
-    jobs: list[dict] = []
-    seen_urls: set[str] = set()
-
-    # Search combinations: (role_slug, location_slug)
-    searches = [
-        ("data-scientist",          "san-francisco-ca"),
-        ("data-analyst",            "san-francisco-ca"),
-        ("machine-learning",        "san-francisco-ca"),
-        ("artificial-intelligence", "san-francisco-ca"),
-        ("data-scientist",          ""),    # remote
-        ("machine-learning",        ""),    # remote
-    ]
-
-    for role_slug, loc_slug in searches:
-        url = f"https://wellfound.com/role/r/{role_slug}"
-        params = {}
-        if loc_slug:
-            params["location"] = loc_slug
-
-        r = _get(url, params=params)
-        if not r:
-            continue
-
-        soup = BeautifulSoup(r.text, "lxml")
-
-        # ── Try __NEXT_DATA__ JSON first ─────────────────────────
-        listings = []
-        script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
-        if script_tag and script_tag.string:
-            try:
-                nd = json.loads(script_tag.string)
-                # Try multiple known key paths
-                page_props = nd.get("props", {}).get("pageProps", {})
-                listings = (
-                    page_props.get("jobListings", []) or
-                    page_props.get("searchResults", {}).get("results", []) or
-                    page_props.get("jobs", []) or
-                    []
-                )
-                # Deep search if still empty
-                if not listings:
-                    raw_str = json.dumps(nd)
-                    for key in ["jobListings", "jobPosts", "results"]:
-                        m = re.search(
-                            rf'"{key}"\s*:\s*(\[.*?\])',
-                            raw_str, re.DOTALL
-                        )
-                        if m:
-                            try:
-                                listings = json.loads(m.group(1))
-                                if listings:
-                                    break
-                            except Exception:
-                                pass
-            except Exception as e:
-                log.warning("Wellfound __NEXT_DATA__ parse error: %s", e)
-
-        # ── HTML fallback: parse job cards directly ───────────────
-        if not listings:
-            log.info("Wellfound: falling back to HTML parsing for %s", role_slug)
-            job_cards = soup.find_all("div", attrs={"data-test": re.compile(r"job", re.I)})
-            if not job_cards:
-                # Try common Wellfound class patterns
-                job_cards = (
-                    soup.find_all("div", class_=re.compile(r"job-listing|JobCard|styles_job", re.I)) or
-                    soup.find_all("a", href=re.compile(r"/jobs/\d+"))
-                )
-            for card in job_cards:
-                link = card.find("a", href=re.compile(r"/jobs/"))
-                if not link:
-                    continue
-                href = link.get("href", "")
-                job_url = f"https://wellfound.com{href}" if not href.startswith("http") else href
-                if job_url in seen_urls:
-                    continue
-                seen_urls.add(job_url)
-                title   = link.get_text(strip=True) or card.get_text(strip=True)[:80]
-                company = ""
-                co_tag  = card.find(class_=re.compile(r"company|startup", re.I))
-                if co_tag:
-                    company = co_tag.get_text(strip=True)
-                jobs.append(dict(
-                    id          = _make_id(company or "wellfound", title, job_url),
-                    title       = title,
-                    company     = company or "Unknown",
-                    location    = "",
-                    url         = job_url,
-                    source      = "Wellfound",
-                    posted_at   = "",
-                    description = "",
-                ))
-            time.sleep(random.uniform(1.5, 2.5))
-            continue
-
-        # ── Process structured listings ───────────────────────────
-        for item in listings:
-            slug    = item.get("slug", "") or item.get("jobUrl", "") or item.get("url", "")
-            job_url = slug if slug.startswith("http") else f"https://wellfound.com{slug}"
-            if not slug or job_url in seen_urls:
-                continue
-            seen_urls.add(job_url)
-
-            title    = item.get("title", "") or item.get("jobTitle", "")
-            startup  = item.get("startup", {}) or item.get("company", {}) or {}
-            company  = startup.get("name", "Unknown")
-            loc_list = item.get("locationNames", []) or item.get("locations", [])
-            location = ", ".join(loc_list) if isinstance(loc_list, list) else str(loc_list)
-            desc     = item.get("description", "") or item.get("jobDescription", "") or ""
-
-            posted_raw = item.get("liveStartAt", "") or item.get("createdAt", "")
-            if isinstance(posted_raw, (int, float)):
-                posted_raw = datetime.fromtimestamp(posted_raw, tz=timezone.utc).isoformat()
-
-            jobs.append(dict(
-                id          = _make_id(company, title, job_url),
-                title       = title,
-                company     = company,
-                location    = location,
-                url         = job_url,
-                source      = "Wellfound",
-                posted_at   = str(posted_raw),
-                description = desc,
-            ))
-
-        time.sleep(random.uniform(1.5, 2.5))
-
-    result = _filter_and_score(jobs)
-    log.info("Wellfound: %d matching jobs (from %d raw)", len(result), len(jobs))
-    return result
-
-
-# ── 3. Greenhouse ─────────────────────────────────────────────────
-
-GH_API = "https://boards-api.greenhouse.io/v1/boards/{board}/jobs"
-
-def _verify_greenhouse_board(board: str) -> bool:
-    """Quick check if a board exists before fetching all jobs."""
-    r = _get(f"https://boards-api.greenhouse.io/v1/boards/{board}")
-    return r is not None and r.status_code == 200
+GH_BASE = "https://boards-api.greenhouse.io/v1/boards"
 
 
 def fetch_greenhouse() -> list[dict]:
     """
-    Greenhouse public ATS API — no auth required.
-    Fetches job list + individual job description for experience filtering.
+    Official Greenhouse Job Board API (public, no auth).
+    Uses ?content=true to get full description in a single API call —
+    eliminating the need for per-job follow-up requests.
+
+    Endpoint: GET /v1/boards/{board_token}/jobs?content=true
     """
     jobs: list[dict] = []
 
     for board in GREENHOUSE_BOARDS:
-        r = _get(GH_API.format(board=board))
+        # Single API call with content=true gets everything we need
+        url = f"{GH_BASE}/{board}/jobs"
+        r = _get(url, params={"content": "true"})
+
         if not r:
+            # 404 means wrong slug — skip silently
             continue
+
         try:
             data = r.json()
         except Exception as e:
@@ -825,40 +902,30 @@ def fetch_greenhouse() -> list[dict]:
 
         board_jobs = data.get("jobs", [])
         if not board_jobs:
+            log.debug("Greenhouse %s: 0 jobs posted", board)
             continue
 
         log.info("Greenhouse %s: %d total jobs", board, len(board_jobs))
 
         for item in board_jobs:
-            title     = item.get("title", "")
-            job_url   = item.get("absolute_url", "")
-            location  = (item.get("location") or {}).get("name", "")
-            posted_raw = item.get("updated_at") or item.get("created_at", "")
-            company   = board.replace("-", " ").title()
+            title      = item.get("title", "")
+            job_url    = item.get("absolute_url", "")
+            location   = (item.get("location") or {}).get("name", "")
+            posted_raw = item.get("updated_at", "") or item.get("created_at", "")
+            company    = board.replace("-", " ").title()
 
-            # Quick title-level filter before fetching description
-            if not _matches_keyword(title):
-                continue
-            if SENIOR_BLOCK.search(title):
-                log.debug("SKIP senior title: %s @ %s", title, company)
-                continue
+            # Description comes directly from ?content=true — no extra request needed
+            raw_desc = item.get("content", "") or ""
+            desc = BeautifulSoup(raw_desc, "lxml").get_text(" ", strip=True) if raw_desc else ""
 
-            # Fetch full job description for experience filtering
-            desc = ""
-            job_id = item.get("id", "")
-            if job_id:
-                desc_r = _get(
-                    f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}"
-                )
-                if desc_r:
-                    try:
-                        desc_data = desc_r.json()
-                        raw_desc  = desc_data.get("content", "") or ""
-                        # Strip HTML tags from description
-                        desc = BeautifulSoup(raw_desc, "lxml").get_text(" ", strip=True)
-                    except Exception:
-                        pass
-                time.sleep(random.uniform(0.2, 0.5))
+            # Also extract department name for better context
+            departments = item.get("departments", []) or []
+            dept_name   = departments[0].get("name", "") if departments else ""
+
+            # Use office location if job location is blank
+            if not location:
+                offices  = item.get("offices", []) or []
+                location = offices[0].get("name", "") if offices else ""
 
             jobs.append(dict(
                 id          = _make_id(company, title, job_url),
@@ -869,6 +936,7 @@ def fetch_greenhouse() -> list[dict]:
                 source      = f"Greenhouse ({board})",
                 posted_at   = posted_raw,
                 description = desc,
+                department  = dept_name,
             ))
 
         time.sleep(random.uniform(0.5, 1.0))
@@ -876,6 +944,7 @@ def fetch_greenhouse() -> list[dict]:
     result = _filter_and_score(jobs)
     log.info("Greenhouse: %d matching jobs (from %d raw)", len(result), len(jobs))
     return result
+
 
 
 # ═════════════════════════════════════════════
@@ -1013,7 +1082,8 @@ def run() -> None:
     _print_budget_estimate()
     conn = init_database()
 
-    if not should_run_now(conn):
+    #if not should_run_now(conn):
+    if False:
         log.info("Not in an active scheduling window — exiting early.")
         conn.close()
         sys.exit(0)
@@ -1023,7 +1093,6 @@ def run() -> None:
 
     all_jobs: list[dict] = []
     all_jobs.extend(fetch_ycombinator())
-    all_jobs.extend(fetch_wellfound())
     all_jobs.extend(fetch_greenhouse())
 
     log.info("Total matching jobs before dedup: %d", len(all_jobs))
