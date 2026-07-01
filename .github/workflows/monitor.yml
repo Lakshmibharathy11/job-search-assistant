@@ -2,12 +2,17 @@ name: Job Monitor
 
 on:
   schedule:
-    # Fires every 20 minutes. The script's should_run_now() exits early
-    # ~90% of the time, so actual compute stays well under 1,000 min/month.
-    - cron: "*/20 * * * *"
+    # Tue & Wed only, 10:00 AM and 2:00 PM PST (17:00 & 21:00 UTC).
+    # Tuesday/Wednesday are the highest-volume recruiter posting days
+    # (post-Monday-planning-meeting batch); two runs catch the morning
+    # batch and same-day updates. 4 runs/week total — quality over quantity.
+    - cron: "0 17,21 * * 2,3"
 
   # Lets you click "Run workflow" in the GitHub Actions UI for testing
   workflow_dispatch:
+
+permissions:
+  contents: write   # needed to commit the updated job_monitor.db back to the repo
 
 jobs:
   monitor:
@@ -15,15 +20,6 @@ jobs:
     timeout-minutes: 8      # hard kill-switch so a hung scrape doesn't drain budget
 
     steps:
-      # ── Restore the SQLite DB from cache so dedup + learning persist ───────
-      - name: Restore job database
-        uses: actions/cache@v4
-        with:
-          path: job_monitor.db
-          key: job-monitor-db-${{ github.run_id }}
-          restore-keys: |
-            job-monitor-db-
-
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -59,10 +55,19 @@ jobs:
           path: job_monitor.log
           retention-days: 7
 
-      # ── Persist updated SQLite DB ────────────────────────────────────────────
-      - name: Save job database
+      # ── Persist the updated SQLite DB directly in the repo. This replaces the
+      # previous actions/cache approach, which could silently fail to restore
+      # or race under overlapping runs, wiping dedup history and causing
+      # repeat notifications for jobs already seen.
+      - name: Commit updated job database
         if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: job_monitor.db
-          key: job-monitor-db-${{ github.run_id }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add job_monitor.db
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update job monitor DB [skip ci]"
+            git push
+          else
+            echo "No DB changes to commit."
+          fi

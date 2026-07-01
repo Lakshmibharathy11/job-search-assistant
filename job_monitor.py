@@ -25,11 +25,29 @@ from typing import Optional
 import re
 
 import requests
+import yaml
 from bs4 import BeautifulSoup
 from twilio.rest import Client as TwilioClient
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ─────────────────────────────────────────────
+# Config — all personal preferences live in config.yaml.
+# Edit that file to tune roles/keywords/locations/boards; no code changes needed.
+# ─────────────────────────────────────────────
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+
+
+def load_config(path: str = CONFIG_PATH) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+
+
+CONFIG = load_config()
 
 # ─────────────────────────────────────────────
 # Logging — UTF-8 safe (fixes Windows cp1252 crash)
@@ -49,73 +67,33 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-# YOUR PROFILE — Lakshmi Bharathy Kumar
-# M.S. Applied Data Intelligence, SJSU May 2026
+# Profile & preferences — loaded from config.yaml (see load_config() above).
+# Edit config.yaml to tune skills/roles/locations/boards without touching code.
 # ─────────────────────────────────────────────
+_profile_cfg = CONFIG.get("profile", {})
+_skills_cfg  = _profile_cfg.get("skills", {})
+
 MY_PROFILE = {
-    "skills": [
-        # Languages
-        "python", "sql", "javascript",
-
-        # AI / LLM / Agents
-        "langchain", "langgraph", "rag", "llm", "large language model",
-        "openai", "gemini", "groq", "prompt engineering",
-        "function calling", "agentic", "agent",
-        "llm-as-judge", "generative ai", "gen ai",
-
-        # ML / Deep Learning
-        "pytorch", "scikit-learn", "xgboost", "transformers",
-        "hugging face", "huggingface", "deep learning",
-        "machine learning", "neural network", "nlp",
-        "natural language processing", "computer vision",
-        "classification", "regression", "feature engineering",
-        "model evaluation", "fine-tuning", "lora", "qlora",
-        "quantization", "onnx", "diffusion", "stable diffusion",
-        "gans", "lstm", "cnn", "bert", "embeddings",
-
-        # Data & Analytics
-        "pandas", "numpy", "statistics", "eda",
-        "data analysis", "data science", "analytics",
-        "a/b testing", "experimentation", "hypothesis testing",
-
-        # Data Engineering
-        "airflow", "dbt", "kafka", "etl", "elt",
-        "snowflake", "data pipeline", "data modeling",
-        "spark",
-
-        # Cloud & MLOps
-        "aws", "docker", "fastapi", "github actions",
-        "ci/cd", "mlops", "rest api",
-
-        # Databases
-        "postgresql", "mongodb", "mysql", "redis",
-        "chromadb", "faiss", "vector database",
-        "dynamodb", "s3",
-
-        # BI & Visualization
-        "power bi", "tableau", "streamlit", "matplotlib",
-        "seaborn", "data visualization", "dashboard",
-        "apache superset",
-    ],
-
-    "education": "master",    # boosts jobs mentioning MS/Master's/Graduate
-    "experience_years": 2,    # 2 years professional experience
-    "min_score": 25,          # lower = see more jobs; raise to 50 for stricter filtering
+    "skills":          sum(_skills_cfg.values(), []) if _skills_cfg else [],
+    "skills_tier1":    _skills_cfg.get("tier1", []),
+    "skills_tier2":    _skills_cfg.get("tier2", []),
+    "skills_tier3":    _skills_cfg.get("tier3", []),
+    "education":       _profile_cfg.get("education", "master"),
+    "min_score":       _profile_cfg.get("min_score", 25),
 }
 
-# Roles Lakshmi is targeting — used in email subject and WhatsApp
-MY_TARGET_ROLES = [
-    "Data Scientist", "Data Analyst", "AI Engineer",
-    "ML Engineer", "Analytics Engineer", "Applied Scientist",
-    "Business Intelligence Engineer", "Data Engineer",
-]
+# Roles targeted — used in email subject, WhatsApp, and keyword matching.
+# Kept tight to entry-level/new-grad AI Engineer, Data Scientist, Data Analyst
+# per user's stated focus. Add more in config.yaml's target_roles to widen it.
+TARGET_KEYWORDS = [r.lower() for r in CONFIG.get("target_roles", [
+    "ai engineer", "data scientist", "data analyst",
+])]
 
 # ─────────────────────────────────────────────
 # Constants & Config
 # ─────────────────────────────────────────────
 PST = ZoneInfo("America/Los_Angeles")
 DB_PATH = "job_monitor.db"
-LEARNING_THRESHOLD = 30
 
 # Recency window: show jobs posted between 30 minutes and 1 week ago
 # - Min 30 min: avoids jobs still being indexed / not fully published
@@ -126,63 +104,18 @@ LOOKBACK_MIN_MINUTES = 0              # 0 = no minimum (include very new jobs to
 LOOKBACK_MAX_DAYS    = 7              # 1 week maximum age
 LOOKBACK_MAX_MINUTES = 7 * 24 * 60   # = 10,080 minutes
 
-TARGET_KEYWORDS = [
-    "data scientist",
-    "data analyst",
-    "ai engineer",
-    "machine learning engineer",
-    "ml engineer",
-    "analytics engineer",
-    "business intelligence",
-    "research scientist",
-    "applied scientist",
-    "data engineer",
-]
+MAX_EXPERIENCE_YEARS = CONFIG.get("experience", {}).get("max_years", 1)
 
-# Location ALLOW list — US only, all work modes welcome
-# Covers: Bay Area in-person, Hybrid, Remote US, and unspecified US locations
-LOCATION_ALLOW = [
-    # ── Bay Area cities (in-person / hybrid) ─────────────────────
-    "san francisco", "bay area", "sf", "south bay", "east bay",
-    "mountain view", "palo alto", "san jose", "santa clara",
-    "sunnyvale", "redwood city", "menlo park", "foster city",
-    "burlingame", "san mateo", "oakland", "berkeley", "emeryville",
-    "fremont", "milpitas", "cupertino", "campbell", "los gatos",
-    "san carlos", "san ramon", "pleasanton", "walnut creek",
-    "south san francisco", "daly city", "hayward", "union city",
+_location_cfg = CONFIG.get("location", {})
+BAY_AREA_CITIES = [c.lower() for c in _location_cfg.get("bay_area_cities", [])]
 
-    # ── State / country level ─────────────────────────────────────
-    ", ca", ", ca,", "(ca)", "california",
-    "united states", "usa", "u.s.", "u.s.a",
-    "north america",
-
-    # ── Remote (all formats companies use) ───────────────────────
-    "remote",           # catches: remote, remote us, remote - us, etc.
-    "work from home", "wfh", "distributed", "virtual",
-    "anywhere in us", "anywhere",
-
-    # ── Hybrid (all formats) ──────────────────────────────────────
-    "hybrid",           # catches: hybrid, hybrid - sf, hybrid (us), etc.
-    "flexible",         # "flexible location", "flexible work"
-    "in-person or remote", "remote or in-person", "on-site or remote",
-
-    # ── In-person / on-site ───────────────────────────────────────
-    "on-site", "onsite", "on site", "in office", "in-office",
-    "in person", "in-person",
-]
+# Location ALLOW list for curated sources (Greenhouse/Lever/Ashby boards are
+# already restricted to Bay Area-headquartered companies, so remote/US-general
+# postings from them are still Bay Area-company roles).
+LOCATION_ALLOW = BAY_AREA_CITIES + [c.lower() for c in _location_cfg.get("us_general", [])]
 
 # Location BLOCK list — explicitly non-US locations to reject
-LOCATION_BLOCK = [
-    "london", "uk", "united kingdom", "england",
-    "canada", "toronto", "vancouver", "montreal",
-    "india", "bangalore", "mumbai", "delhi", "hyderabad",
-    "germany", "berlin", "munich", "frankfurt",
-    "france", "paris",
-    "singapore", "australia", "sydney", "melbourne",
-    "brazil", "mexico", "latam", "latin america",
-    "europe", "apac", "emea",
-    "amsterdam", "dublin", "stockholm", "zurich",
-]
+LOCATION_BLOCK = [c.lower() for c in _location_cfg.get("block", [])]
 
 # ── Experience level filters ──────────────────────────────────────
 # Jobs MUST match at least one ENTRY signal OR have NO experience signal at all
@@ -199,13 +132,15 @@ ENTRY_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
-# Jobs with these are HARD BLOCKED regardless of anything else
+# Jobs with these are HARD BLOCKED regardless of anything else.
+# Threshold is MAX_EXPERIENCE_YEARS + 1 and up (config.yaml experience.max_years,
+# default 1) — kept tight to the 0-1 yr entry-level/new-grad focus.
 SENIOR_BLOCK = re.compile(
     r"\b("
     r"senior|sr\.?|lead|principal|staff|director|vp|"
     r"vice[\s\-]?president|head[\s\-]?of|manager|"
-    r"[3-9]\+?[\s]?year|10\+?[\s]?year|"       # 3+ years and above
-    r"[3-9][\s\-][\d]+[\s]?year"               # 3-X years range
+    rf"[{MAX_EXPERIENCE_YEARS + 1}-9]\+?[\s]?year|10\+?[\s]?year|"   # (max+1)+ years and above
+    rf"[{MAX_EXPERIENCE_YEARS + 1}-9][\s\-][\d]+[\s]?year"           # (max+1)-X years range
     r")\b",
     re.IGNORECASE,
 )
@@ -238,9 +173,9 @@ def passes_experience_filter(title: str, description: str = "") -> tuple[bool, s
     """
     Returns (passes: bool, reason: str)
 
-    Logic:
+    Logic (bound is config.yaml experience.max_years, default 1):
     1. Hard block if title contains senior/lead/etc.
-    2. Hard block if description explicitly requires 3+ years.
+    2. Hard block if description explicitly requires more than max_years.
     3. Pass if title/description has entry-level signals.
     4. Pass if NO experience requirement is mentioned at all.
     5. Block otherwise.
@@ -253,7 +188,7 @@ def passes_experience_filter(title: str, description: str = "") -> tuple[bool, s
 
     # Rule 2 — check explicit year requirements in description
     max_exp = _extract_max_experience(combined)
-    if max_exp is not None and max_exp >= 3:
+    if max_exp is not None and max_exp > MAX_EXPERIENCE_YEARS:
         return False, f"Requires {max_exp}+ years experience"
 
     # Rule 3 — explicit entry-level signal → always pass
@@ -264,8 +199,8 @@ def passes_experience_filter(title: str, description: str = "") -> tuple[bool, s
     if max_exp is None:
         return True, "No experience requirement specified"
 
-    # Rule 5 — 1-2 years mentioned → pass (close enough for new grad)
-    if max_exp <= 2:
+    # Rule 5 — within the allowed years → pass
+    if max_exp <= MAX_EXPERIENCE_YEARS:
         return True, f"Only {max_exp} year(s) required"
 
     return False, f"Requires {max_exp} years — too senior"
@@ -282,20 +217,13 @@ def _title_base_score(title: str) -> int:
     t = title.lower()
     # Direct role matches — these are exactly what we want
     role_scores = {
-        "data scientist":              70,
-        "data analyst":                70,
-        "machine learning engineer":   70,
-        "ml engineer":                 70,
-        "ai engineer":                 70,
-        "analytics engineer":          65,
-        "data engineer":               65,
-        "applied scientist":           65,
-        "research scientist":          60,
-        "business intelligence":       60,
-        "quantitative analyst":        55,
-        "applied ml":                  65,
-        "nlp engineer":                65,
-        "computer vision":             60,
+        "data scientist":       70,
+        "data science":         70,
+        "data analyst":         70,
+        "ai engineer":          70,
+        "applied ai engineer":  70,
+        "genai engineer":       70,
+        "gen ai engineer":      70,
     }
     for role, base in role_scores.items():
         if role in t:
@@ -311,32 +239,16 @@ def profile_match_score(title: str, description: str = "") -> int:
     combined = f"{title} {description}".lower()
     score = 0
 
-    # ── Tier 1: Core AI/ML skills (5 pts each, up to 40)
-    tier1 = [
-        "python", "machine learning", "deep learning", "pytorch",
-        "llm", "rag", "langchain", "langgraph", "generative ai",
-        "nlp", "natural language processing", "transformer",
-        "data science", "scikit-learn",
-    ]
-    t1_matches = sum(1 for s in tier1 if s in combined)
+    # ── Tier 1: Core AI/ML skills (5 pts each, up to 40) — from config.yaml
+    t1_matches = sum(1 for s in MY_PROFILE["skills_tier1"] if s in combined)
     score += min(40, t1_matches * 5)
 
-    # ── Tier 2: Data & Engineering skills (3 pts each, up to 25)
-    tier2 = [
-        "sql", "pandas", "data analysis", "airflow", "dbt",
-        "snowflake", "aws", "docker", "fastapi", "kafka",
-        "postgresql", "mongodb", "etl", "data pipeline",
-        "feature engineering", "a/b testing", "experimentation",
-    ]
-    t2_matches = sum(1 for s in tier2 if s in combined)
+    # ── Tier 2: Data & Engineering skills (3 pts each, up to 25) — from config.yaml
+    t2_matches = sum(1 for s in MY_PROFILE["skills_tier2"] if s in combined)
     score += min(25, t2_matches * 3)
 
-    # ── Tier 3: BI & Visualization (2 pts each, up to 15)
-    tier3 = [
-        "power bi", "tableau", "streamlit", "dashboard",
-        "data visualization", "matplotlib", "analytics",
-    ]
-    t3_matches = sum(1 for s in tier3 if s in combined)
+    # ── Tier 3: BI & Visualization (2 pts each, up to 15) — from config.yaml
+    t3_matches = sum(1 for s in MY_PROFILE["skills_tier3"] if s in combined)
     score += min(15, t3_matches * 2)
 
     # ── Bonus: Education match (+10)
@@ -366,92 +278,45 @@ USER_AGENTS = [
 ]
 
 # ─────────────────────────────────────────────
-# Greenhouse boards — verified slugs only
+# Job boards — tokens loaded from config.yaml (boards.greenhouse/lever/ashby).
+# Wrong/outdated tokens 404 silently and just yield 0 jobs for that board.
 # ─────────────────────────────────────────────
-# Greenhouse board tokens
-# How to find: go to a company's job page -> look at URL: boards.greenhouse.io/<TOKEN>
-# Official API docs: https://developers.greenhouse.io/job-board.html
-# Authentication: NOT required for GET endpoints (fully public API)
-# ── Greenhouse board tokens ────────────────────────────────────────
-# Verified from log output June 14 2026:
-#   WORKING:   assemblyai, brex, gusto, lattice, databricks, fivetran,
-#              hightouch, anthropic, scaleai, togetherai, coinbase, figma,
-#              asana, lyft, stripe, airtable, amplitude, mixpanel, vercel
-#   404 (wrong slug): openai, cohere, rippling, notion, retool, benchling,
-#              anyscale, mistral, perplexity, elevenlabs, baseten, deepgram,
-#              replit, persona, wandb, huggingface, dbtlabs, census, airbyte,
-#              doordash, linear, supabase, modal, replicate, groq, cerebras
-#
-# How to find correct slug: visit boards.greenhouse.io/<slug> in browser
-# If it shows jobs -> slug is correct. If 404 -> try company name variations.
-GREENHOUSE_BOARDS = [
-    # ── Confirmed working from logs ──────────────────────────────
-    "assemblyai",           # AssemblyAI
-    "brex",                 # Brex
-    "gusto",                # Gusto
-    "lattice",              # Lattice
-    "databricks",           # Databricks
-    "fivetran",             # Fivetran
-    "hightouch",            # Hightouch
-    "anthropic",            # Anthropic
-    "scaleai",              # Scale AI
-    "togetherai",           # Together AI
-    "coinbase",             # Coinbase
-    "figma",                # Figma
-    "asana",                # Asana
-    "lyft",                 # Lyft
-    "stripe",               # Stripe
-    "airtable",             # Airtable
-    "amplitude",            # Amplitude
-    "mixpanel",             # Mixpanel
-    "vercel",               # Vercel
+_boards_cfg = CONFIG.get("boards", {})
+GREENHOUSE_BOARDS = _boards_cfg.get("greenhouse", [])
+LEVER_BOARDS       = _boards_cfg.get("lever", [])
+ASHBY_BOARDS       = _boards_cfg.get("ashby", [])
 
-    # ── Corrected slugs (fixed from 404s) ────────────────────────
-    "openai-2",             # OpenAI (try common variants)
-    "cohereai",             # Cohere
-    "ripplingwork",         # Rippling
-    "notionlabs",           # Notion
-    "retoolhq",             # Retool
-    "benchling",            # Benchling (retry — may be intermittent)
-    "anyscaleinc",          # Anyscale
-    "mistralai",            # Mistral
-    "perplexityai",         # Perplexity
-    "elevenlabsio",         # ElevenLabs
-    "basetenhq",            # Baseten
-    "deepgramai",           # Deepgram
-    "replitapp",            # Replit
-    "withpersona",          # Persona
-    "weightsandbiases",     # Weights & Biases
-    "huggingfaceinc",       # HuggingFace
-    "getdbt",               # dbt Labs
-    "getcensus",            # Census
-    "airbyteinc",           # Airbyte
-    "doordash-2",           # DoorDash
-    "linearapp",            # Linear
-    "supabaseinc",          # Supabase
-    "modalapp",             # Modal
-    "replicateai",          # Replicate
-    "groqinc",              # Groq
-    "cerebrasai",           # Cerebras
-    "datastax",             # DataStax
-    "pineconeio",           # Pinecone
-    "weaviateinc",          # Weaviate
-    "groqcloud",            # Groq (alt)
-    "langchainai",          # LangChain
-    "vellumhq",             # Vellum
+# ─────────────────────────────────────────────
+# Spam / fake-job detection
+# ─────────────────────────────────────────────
+# Hard-block patterns — unambiguous scam signals. A match drops the job
+# entirely, same as any other filter failure.
+SPAM_HARD_BLOCK = re.compile(
+    r"("
+    r"processing[\s\-]?fee|training[\s\-]?fee|starter[\s\-]?kit|"
+    r"purchase[\s\-](?:your[\s\-]?own[\s\-]?)?equipment|"
+    r"wire[\s\-]?transfer|send[\s\-](?:us[\s\-])?(?:your[\s\-])?bank|"
+    r"routing[\s\-]?number|social[\s\-]?security[\s\-]?number|\bssn\b|"
+    r"no[\s\-]?interview[\s\-]?(?:necessary|required|needed)|"
+    r"(?:immediate|same[\s\-]?day)[\s\-]?hire"
+    r")",
+    re.IGNORECASE,
+)
 
-    # ── Additional strong matches for your profile ────────────────
-    "snowflake",            # Snowflake
-    "dbt-labs",             # dbt Labs (alt slug)
-    "mongodb",              # MongoDB
-    "elastic",              # Elastic
-    "confluent",            # Confluent
-    "segment",              # Segment (Twilio)
-    "datarobot",            # DataRobot
-    "domino-data-lab",      # Domino Data Lab
-    "weights-biases",       # W&B alt slug
-    "modal-labs",           # Modal alt slug
-]
+# Free webmail domains — a posting whose *only* contact method is one of
+# these (no company domain anywhere in the text) is a red flag.
+_FREE_EMAIL_DOMAINS = r"(?:gmail|yahoo|hotmail|outlook|aol|protonmail)\.com"
+SPAM_FREE_EMAIL_ONLY = re.compile(
+    r"[\w.+-]+@" + _FREE_EMAIL_DOMAINS, re.IGNORECASE
+)
+SPAM_ANY_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[a-z]{2,}", re.IGNORECASE)
+
+# Soft-flag patterns — ambiguous, still shown but badged + score penalty.
+SPAM_PAY_CLAIM = re.compile(
+    r"\$\s?\d{2,3}\s?(?:/|per)\s?(?:hour|hr)|"      # "$100/hour" for a junior role
+    r"\$\s?\d{1,3}[,.]?\d{3}\s?(?:/|per)\s?week",    # "$10,000/week"
+    re.IGNORECASE,
+)
 
 # ─────────────────────────────────────────────
 # Credentials
@@ -466,6 +331,42 @@ SMTP_PORT     = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER     = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 EMAIL_TO      = os.environ.get("EMAIL_TO", SMTP_USER)
+
+
+def spam_check(
+    title: str, description: str, location: str = "", source: str = ""
+) -> tuple[bool, bool, list[str]]:
+    """
+    Returns (hard_block, suspicious, reasons).
+
+    hard_block  — unambiguous scam signal, drop the job entirely.
+    suspicious  — ambiguous signal, keep the job but badge it + penalize score.
+    """
+    combined = f"{title} {description}"
+    reasons: list[str] = []
+
+    if SPAM_HARD_BLOCK.search(combined):
+        return True, False, ["Contains known scam phrasing (fee/payment/urgency request)"]
+
+    emails = SPAM_ANY_EMAIL.findall(combined)
+    if emails and all(SPAM_FREE_EMAIL_ONLY.search(e) for e in emails):
+        return True, False, ["Only contact method is a personal webmail address"]
+
+    # Only the YC marketplace source is un-curated enough to warrant a
+    # short-description penalty — Greenhouse/Lever/Ashby always return full
+    # ATS-authored descriptions.
+    if source == "YC Work at a Startup" and len(description.strip()) < 30:
+        reasons.append("Very short/vague description from an open marketplace listing")
+
+    if location:
+        loc = location.lower()
+        if any(b in loc for b in LOCATION_BLOCK) and any(a in loc for a in LOCATION_ALLOW):
+            reasons.append("Location text contradicts itself (mixes Bay Area/US and blocked region)")
+
+    if SPAM_PAY_CLAIM.search(combined) and ENTRY_SIGNALS.search(combined):
+        reasons.append("Unrealistic pay claim for an entry-level role")
+
+    return False, bool(reasons), reasons
 
 
 # ═════════════════════════════════════════════
@@ -494,14 +395,6 @@ def init_database() -> sqlite3.Connection:
             found_at  TEXT,
             hour_pst  INTEGER,
             weekday   INTEGER
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS schedule_weights (
-            weekday   INTEGER,
-            hour_pst  INTEGER,
-            weight    REAL DEFAULT 1.0,
-            PRIMARY KEY (weekday, hour_pst)
         )
     """)
     # Add new columns to existing db if upgrading
@@ -551,82 +444,10 @@ def total_jobs_found(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM job_events").fetchone()[0]
 
 
-# ═════════════════════════════════════════════
-# SMART SCHEDULING
-# ═════════════════════════════════════════════
-
-BASE_SCHEDULE = {
-    0: [(9, 11, 60),  (12, 17, 180), (19, 20, 999)],   # Monday
-    1: [(8, 12, 20),  (12, 17, 180), (19, 20, 999)],   # Tuesday
-    2: [(8, 12, 20),  (12, 17, 180), (19, 20, 999)],   # Wednesday
-    3: [(8, 12, 20),  (12, 17, 180), (19, 20, 999)],   # Thursday
-    4: [(9, 11, 60),  (12, 17, 180), (19, 20, 999)],   # Friday
-    5: [],                                               # Saturday
-    6: [],                                               # Sunday
-}
-
-
-def should_run_now(conn: Optional[sqlite3.Connection] = None) -> bool:
-    now     = datetime.now(PST)
-    weekday = now.weekday()
-    hour    = now.hour
-    minute  = now.minute
-
-    windows = BASE_SCHEDULE.get(weekday, [])
-    if not windows:
-        log.info("Weekend — no runs scheduled today.")
-        return False
-
-    for (start, end, interval) in windows:
-        if start <= hour < end:
-            if interval <= 20:
-                return True
-            mins_since_start = (hour - start) * 60 + minute
-            if mins_since_start % interval < 20:
-                if conn and _learned_weight(conn, weekday, hour) < 0.3:
-                    log.info("Learning suppressed run at weekday=%d hour=%d", weekday, hour)
-                    return False
-                return True
-
-    log.info("Outside active windows for weekday=%d hour=%d — skipping.", weekday, hour)
-    return False
-
-
-def _learned_weight(conn: sqlite3.Connection, weekday: int, hour: int) -> float:
-    row = conn.execute(
-        "SELECT weight FROM schedule_weights WHERE weekday=? AND hour_pst=?",
-        (weekday, hour),
-    ).fetchone()
-    return row[0] if row else 1.0
-
-
-def learn_and_adjust_schedule(conn: sqlite3.Connection) -> None:
-    total = total_jobs_found(conn)
-    if total < LEARNING_THRESHOLD:
-        log.info("Learning: %d/%d jobs — not enough data yet.", total, LEARNING_THRESHOLD)
-        return
-    rows = conn.execute(
-        "SELECT weekday, hour_pst, COUNT(*) FROM job_events GROUP BY weekday, hour_pst"
-    ).fetchall()
-    if not rows:
-        return
-    max_cnt = max(r[2] for r in rows)
-    for weekday, hour, cnt in rows:
-        weight = round(cnt / max_cnt, 3)
-        conn.execute(
-            """INSERT INTO schedule_weights (weekday, hour_pst, weight) VALUES (?, ?, ?)
-               ON CONFLICT(weekday, hour_pst) DO UPDATE SET weight=excluded.weight""",
-            (weekday, hour, weight),
-        )
-    conn.commit()
-    log.info("Learning: weights updated from %d data points.", total)
-
-
-def _print_budget_estimate() -> None:
-    log.info(
-        "Estimated monthly GitHub Actions runtime: ~116 min "
-        "(free tier limit: 2,000 min)"
-    )
+# Cadence is now controlled entirely by the workflow cron (Tue & Wed,
+# 10am & 2pm PST — see .github/workflows/monitor.yml), so no in-script
+# time-window gating is needed. The previous gate was left disabled via a
+# stray `if False:` in run(), which is what caused unrestricted 24/7 runs.
 
 
 # ═════════════════════════════════════════════
@@ -657,8 +478,16 @@ def _get(url: str, **kwargs) -> Optional[requests.Response]:
     return None
 
 
-def _make_id(company: str, title: str, url: str) -> str:
-    raw = f"{company.lower()}|{title.lower()}|{url.lower()}"
+def _make_id(source: str, native_id: str, company: str, url: str) -> str:
+    """
+    Stable dedup ID. Prefers the platform's own posting ID (which doesn't
+    change if a company edits the title/description later) over a hash of
+    mutable text — this is what fixes jobs being re-notified after an edit.
+    """
+    if native_id:
+        raw = f"{source.lower()}|{native_id}"
+    else:
+        raw = f"{source.lower()}|{company.lower()}|{url.lower()}"
     return hashlib.sha256(raw.encode()).hexdigest()[:20]
 
 
@@ -667,14 +496,24 @@ def _matches_keyword(title: str) -> bool:
     return any(kw in t for kw in TARGET_KEYWORDS)
 
 
-def _matches_location(location: str) -> bool:
+def _matches_location(location: str, strict_bay_area: bool = False) -> bool:
     """
     Two-pass location check:
     1. Hard block if an explicit non-US keyword is found
-    2. Allow if a US/Bay Area keyword is found OR location is empty/unknown
+    2. Allow only if a recognised US/Bay Area/remote keyword is found
+
+    Blank location is treated as unspecified/remote-friendly and included.
+    A location string that IS present but matches neither an allow nor a
+    block keyword (e.g. "Seoul, South Korea", a city not in either list) is
+    now EXCLUDED by default — previously it defaulted to included, which let
+    unrelated-geography postings slip through the Bay Area-only focus.
+
+    strict_bay_area=True is used for un-curated sources (YC marketplace):
+    only an explicit Bay Area city/CA match is accepted, not generic
+    remote/US-wide, since we can't assume the company is Bay Area-based.
     """
     if not location:
-        return True   # no location listed — include (many remote jobs skip it)
+        return not strict_bay_area   # unknown location: include unless strict
 
     loc = location.lower().strip()
 
@@ -682,13 +521,11 @@ def _matches_location(location: str) -> bool:
     if any(block_kw in loc for block_kw in LOCATION_BLOCK):
         return False
 
-    # Pass 2: allow US / Bay Area / remote
-    if any(allow_kw in loc for allow_kw in LOCATION_ALLOW):
-        return True
+    if strict_bay_area:
+        return any(city in loc for city in BAY_AREA_CITIES)
 
-    # Unknown location not blocked and not recognised — include it
-    # (better to see an irrelevant job than miss a good one)
-    return True
+    # Pass 2: allow only recognised US / Bay Area / remote locations
+    return any(allow_kw in loc for allow_kw in LOCATION_ALLOW)
 
 
 def _parse_iso(ts: str) -> Optional[datetime]:
@@ -730,15 +567,19 @@ def _is_recent(posted_at: Optional[datetime], lookback_minutes: int = LOOKBACK_M
     return passes
 
 
-def _filter_and_score(raw: list[dict]) -> list[dict]:
+def _filter_and_score(raw: list[dict], strict_location: bool = False) -> list[dict]:
     """
     Apply ALL filters and add match_score + exp_level to each job.
     Returns only jobs that pass every filter.
+
+    strict_location=True should be set for un-curated sources (YC) where we
+    can't assume the company is Bay Area-based — see _matches_location().
     """
     out = []
     for job in raw:
         title       = job.get("title", "")
         description = job.get("description", "")
+        location    = job.get("location", "")
 
         # ── Filter 1: must match a target role keyword
         if not _matches_keyword(title):
@@ -746,8 +587,8 @@ def _filter_and_score(raw: list[dict]) -> list[dict]:
             continue
 
         # ── Filter 2: location
-        if not _matches_location(job.get("location", "")):
-            log.debug("SKIP (location): %s @ %s", title, job.get("location"))
+        if not _matches_location(location, strict_bay_area=strict_location):
+            log.debug("SKIP (location): %s @ %s", title, location)
             continue
 
         # ── Filter 3: recency window (30 min – 7 days)
@@ -756,10 +597,18 @@ def _filter_and_score(raw: list[dict]) -> list[dict]:
             log.debug("SKIP (time: %s): %s", time_reason, title)
             continue
 
-        # ── Filter 4: experience level (the main new filter)
+        # ── Filter 4: experience level
         passes, reason = passes_experience_filter(title, description)
         if not passes:
             log.debug("SKIP (exp): %s — %s", title, reason)
+            continue
+
+        # ── Filter 5: spam / fake-job detection
+        hard_block, suspicious, spam_reasons = spam_check(
+            title, description, location, job.get("source", "")
+        )
+        if hard_block:
+            log.info("SKIP (spam): %s @ %s — %s", title, job.get("company"), spam_reasons)
             continue
 
         # ── Score: profile match
@@ -774,6 +623,9 @@ def _filter_and_score(raw: list[dict]) -> list[dict]:
         if not has_description:
             score = max(score, _title_base_score(title))
 
+        if suspicious:
+            score = max(0, score - 20)
+
         # Determine experience level label for display
         if ENTRY_SIGNALS.search(f"{title} {description}"):
             exp_level = "Entry Level"
@@ -782,6 +634,8 @@ def _filter_and_score(raw: list[dict]) -> list[dict]:
 
         job["match_score"] = score
         job["exp_level"]   = exp_level
+        job["suspicious"]  = suspicious
+        job["spam_reasons"] = spam_reasons
         out.append(job)
 
     return out
@@ -799,11 +653,10 @@ def fetch_ycombinator() -> list[dict]:
     jobs: list[dict] = []
     seen_urls: set[str] = set()
 
-    search_terms = [
-        "data scientist", "data analyst",
-        "machine learning engineer", "AI engineer",
-        "analytics engineer", "data engineer",
-    ]
+    # YC is an open marketplace (not curated to Bay Area startups), so we
+    # search using exactly the configured target roles and apply strict
+    # Bay Area location matching below.
+    search_terms = TARGET_KEYWORDS
 
     for kw in search_terms:
         params = {
@@ -847,7 +700,7 @@ def fetch_ycombinator() -> list[dict]:
                 desc = f"{desc} Experience: {exp_str}".strip()
 
             jobs.append(dict(
-                id          = _make_id(company, title, url),
+                id          = _make_id("yc", str(jid), company, url),
                 title       = title,
                 company     = company,
                 location    = location,
@@ -859,7 +712,9 @@ def fetch_ycombinator() -> list[dict]:
 
         time.sleep(random.uniform(0.5, 1.0))
 
-    result = _filter_and_score(jobs)
+    # strict_location=True: YC is an un-curated marketplace, so require an
+    # explicit Bay Area match rather than accepting generic remote/US-wide.
+    result = _filter_and_score(jobs, strict_location=True)
     log.info("YC: %d matching jobs (from %d raw)", len(result), len(jobs))
     return result
 
@@ -928,7 +783,7 @@ def fetch_greenhouse() -> list[dict]:
                 location = offices[0].get("name", "") if offices else ""
 
             jobs.append(dict(
-                id          = _make_id(company, title, job_url),
+                id          = _make_id("greenhouse", str(item.get("id", "")), company, job_url),
                 title       = title,
                 company     = company,
                 location    = location,
@@ -946,6 +801,118 @@ def fetch_greenhouse() -> list[dict]:
     return result
 
 
+# ── 3. Lever (Official Public API) ───────────────────────────────
+# Docs: https://github.com/lever/postings-api — fully public, no auth.
+# Endpoint: GET /v0/postings/{company}?mode=json
+
+LEVER_BASE = "https://api.lever.co/v0/postings"
+
+
+def fetch_lever() -> list[dict]:
+    jobs: list[dict] = []
+
+    for board in LEVER_BOARDS:
+        url = f"{LEVER_BASE}/{board}"
+        r = _get(url, params={"mode": "json"})
+        if not r:
+            continue  # 404/blocked = wrong slug, skip silently
+
+        try:
+            postings = r.json()
+        except Exception as e:
+            log.warning("Lever %s JSON error: %s", board, e)
+            continue
+
+        if not isinstance(postings, list) or not postings:
+            log.debug("Lever %s: 0 jobs posted", board)
+            continue
+
+        log.info("Lever %s: %d total jobs", board, len(postings))
+        company = board.replace("-", " ").title()
+
+        for item in postings:
+            title      = item.get("text", "")
+            job_url    = item.get("hostedUrl", "")
+            categories = item.get("categories", {}) or {}
+            location   = categories.get("location", "") or ""
+            posted_raw = item.get("createdAt", "")
+            if isinstance(posted_raw, (int, float)):
+                posted_raw = datetime.fromtimestamp(posted_raw / 1000, tz=timezone.utc).isoformat()
+            desc = item.get("descriptionPlain", "") or item.get("description", "") or ""
+
+            jobs.append(dict(
+                id          = _make_id("lever", str(item.get("id", "")), company, job_url),
+                title       = title,
+                company     = company,
+                location    = location,
+                url         = job_url,
+                source      = f"Lever ({board})",
+                posted_at   = posted_raw,
+                description = desc,
+            ))
+
+        time.sleep(random.uniform(0.5, 1.0))
+
+    result = _filter_and_score(jobs)
+    log.info("Lever: %d matching jobs (from %d raw)", len(result), len(jobs))
+    return result
+
+
+# ── 4. Ashby (Official Public API) ───────────────────────────────
+# Docs: https://developers.ashbyhq.com/docs/job-posting-api — fully public, no auth.
+# Endpoint: GET /posting-api/job-board/{board}
+
+ASHBY_BASE = "https://api.ashbyhq.com/posting-api/job-board"
+
+
+def fetch_ashby() -> list[dict]:
+    jobs: list[dict] = []
+
+    for board in ASHBY_BOARDS:
+        url = f"{ASHBY_BASE}/{board}"
+        r = _get(url, params={"includeCompensation": "false"})
+        if not r:
+            continue  # 404/blocked = wrong slug, skip silently
+
+        try:
+            data = r.json()
+        except Exception as e:
+            log.warning("Ashby %s JSON error: %s", board, e)
+            continue
+
+        postings = data.get("jobs", [])
+        if not postings:
+            log.debug("Ashby %s: 0 jobs posted", board)
+            continue
+
+        log.info("Ashby %s: %d total jobs", board, len(postings))
+        company = board.replace("-", " ").title()
+
+        for item in postings:
+            title      = item.get("title", "")
+            job_url    = item.get("jobUrl", "") or item.get("applyUrl", "")
+            location   = item.get("location", "") or ""
+            posted_raw = item.get("publishedDate", "") or item.get("updatedAt", "")
+            raw_desc   = item.get("descriptionHtml", "") or ""
+            desc       = BeautifulSoup(raw_desc, "lxml").get_text(" ", strip=True) if raw_desc else ""
+
+            jobs.append(dict(
+                id          = _make_id("ashby", str(item.get("id", "")), company, job_url),
+                title       = title,
+                company     = company,
+                location    = location,
+                url         = job_url,
+                source      = f"Ashby ({board})",
+                posted_at   = posted_raw,
+                description = desc,
+            ))
+
+        time.sleep(random.uniform(0.5, 1.0))
+
+    result = _filter_and_score(jobs)
+    log.info("Ashby: %d matching jobs (from %d raw)", len(result), len(jobs))
+    return result
+
 
 # ═════════════════════════════════════════════
 # NOTIFICATIONS
@@ -957,10 +924,11 @@ def send_whatsapp(job: dict) -> bool:
         return False
 
     score_bar = "█" * (job.get("match_score", 0) // 10) + "░" * (10 - job.get("match_score", 0) // 10)
+    title = job["title"] if not job.get("suspicious") else f"⚠️ {job['title']} (verify carefully)"
 
     body = (
         f"🚀 *New Job Alert*\n"
-        f"*{job['title']}*\n"
+        f"*{title}*\n"
         f"🏢 {job['company']}\n"
         f"📍 {job.get('location') or 'Not listed'}\n"
         f"🎯 Level: {job.get('exp_level', 'Unknown')}\n"
@@ -1000,10 +968,16 @@ def send_combined_email(jobs: list[dict]) -> bool:
             f'<span style="background:#fef9c3;color:#713f12;padding:2px 8px;'
             f'border-radius:4px;font-size:11px;">{level}</span>'
         )
+        spam_badge = (
+            f'<br><span title="{"; ".join(job.get("spam_reasons", []))}" '
+            f'style="background:#fee2e2;color:#991b1b;padding:2px 8px;'
+            f'border-radius:4px;font-size:11px;">⚠️ Verify Carefully</span>'
+            if job.get("suspicious") else ""
+        )
         rows += f"""
         <tr style="background:{bg};">
           <td style="padding:10px;border-bottom:1px solid #e5e7eb;">
-            <strong style="font-size:14px;">{job['title']}</strong><br>
+            <strong style="font-size:14px;">{job['title']}</strong>{spam_badge}<br>
             <span style="color:#6b7280;font-size:12px;">{job['company']}</span>
           </td>
           <td style="padding:10px;border-bottom:1px solid #e5e7eb;font-size:12px;">
@@ -1079,21 +1053,15 @@ def send_combined_email(jobs: list[dict]) -> bool:
 # ═════════════════════════════════════════════
 
 def run() -> None:
-    _print_budget_estimate()
     conn = init_database()
 
-    #if not should_run_now(conn):
-    if False:
-        log.info("Not in an active scheduling window — exiting early.")
-        conn.close()
-        sys.exit(0)
-
-    log.info("Active window — starting scrape at %s PST",
-             datetime.now(PST).strftime("%A %Y-%m-%d %H:%M"))
+    log.info("Starting scrape at %s PST", datetime.now(PST).strftime("%A %Y-%m-%d %H:%M"))
 
     all_jobs: list[dict] = []
     all_jobs.extend(fetch_ycombinator())
     all_jobs.extend(fetch_greenhouse())
+    all_jobs.extend(fetch_lever())
+    all_jobs.extend(fetch_ashby())
 
     log.info("Total matching jobs before dedup: %d", len(all_jobs))
 
@@ -1103,9 +1071,10 @@ def run() -> None:
             log.debug("Already seen: %s @ %s", job["title"], job["company"])
             continue
         log.info(
-            "NEW [%d%% match | %s]: %s @ %s [%s]",
+            "NEW [%d%% match | %s%s]: %s @ %s [%s]",
             job.get("match_score", 0),
             job.get("exp_level", "?"),
+            " | SUSPICIOUS" if job.get("suspicious") else "",
             job["title"], job["company"], job["source"],
         )
         new_jobs.append(job)
@@ -1120,7 +1089,6 @@ def run() -> None:
         log.info("No new jobs found this run.")
 
     log.info("Run complete — %d new job(s) notified.", len(new_jobs))
-    learn_and_adjust_schedule(conn)
     conn.close()
 
 

@@ -1,0 +1,258 @@
+# ─────────────────────────────────────────────
+# Job Monitor Preferences
+# Edit this file to tune what jobs you see — no code changes needed.
+# ─────────────────────────────────────────────
+
+profile:
+  education: master        # boosts jobs mentioning MS/Master's/Graduate
+  min_score: 25             # lower = see more jobs; raise to be stricter
+
+  # Skills used for profile-match scoring (tiered by weight in job_monitor.py)
+  skills:
+    tier1:  # Core AI/ML — 5 pts each, up to 40
+      - python
+      - machine learning
+      - deep learning
+      - pytorch
+      - llm
+      - rag
+      - langchain
+      - langgraph
+      - generative ai
+      - nlp
+      - natural language processing
+      - transformer
+      - data science
+      - scikit-learn
+    tier2:  # Data & Engineering — 3 pts each, up to 25
+      - sql
+      - pandas
+      - data analysis
+      - airflow
+      - dbt
+      - snowflake
+      - aws
+      - docker
+      - fastapi
+      - kafka
+      - postgresql
+      - mongodb
+      - etl
+      - data pipeline
+      - feature engineering
+      - a/b testing
+      - experimentation
+    tier3:  # BI & Visualization — 2 pts each, up to 15
+      - power bi
+      - tableau
+      - streamlit
+      - dashboard
+      - data visualization
+      - matplotlib
+      - analytics
+
+# Roles actually targeted — kept tight to your stated focus:
+# entry-level / new-grad AI Engineer, Data Scientist, Data Analyst only.
+# Add more roles here later if you want to widen the net.
+target_roles:
+  - "ai engineer"
+  - "applied ai engineer"
+  - "genai engineer"
+  - "gen ai engineer"
+  - "data scientist"
+  - "data science"
+  - "data analyst"
+
+# Maximum years of experience a posting may require. Postings requiring
+# more than this are hard-blocked (see SENIOR_BLOCK in job_monitor.py).
+experience:
+  max_years: 1
+
+location:
+  bay_area_cities:
+    - san francisco
+    - bay area
+    - sf
+    - south bay
+    - east bay
+    - mountain view
+    - palo alto
+    - san jose
+    - santa clara
+    - sunnyvale
+    - redwood city
+    - menlo park
+    - foster city
+    - burlingame
+    - san mateo
+    - oakland
+    - berkeley
+    - emeryville
+    - fremont
+    - milpitas
+    - cupertino
+    - campbell
+    - los gatos
+    - san carlos
+    - san ramon
+    - pleasanton
+    - walnut creek
+    - south san francisco
+    - daly city
+    - hayward
+    - union city
+
+  # Accepted alongside bay_area_cities for curated sources (Greenhouse/Lever/Ashby),
+  # since those boards are already restricted to Bay Area-headquartered companies.
+  us_general:
+    - ", ca"
+    - ", ca,"
+    - "(ca)"
+    - california
+    - united states
+    - usa
+    - u.s.
+    - u.s.a
+    - north america
+    - remote
+    - work from home
+    - wfh
+    - distributed
+    - virtual
+    - anywhere in us
+    - anywhere
+    - hybrid
+    - flexible
+    - in-person or remote
+    - remote or in-person
+    - on-site or remote
+    - on-site
+    - onsite
+    - on site
+    - in office
+    - in-office
+    - in person
+    - in-person
+
+  block:
+    - london
+    - uk
+    - united kingdom
+    - england
+    - canada
+    - toronto
+    - vancouver
+    - montreal
+    - india
+    - bangalore
+    - mumbai
+    - delhi
+    - hyderabad
+    - germany
+    - berlin
+    - munich
+    - frankfurt
+    - france
+    - paris
+    - singapore
+    - australia
+    - sydney
+    - melbourne
+    - brazil
+    - mexico
+    - latam
+    - latin america
+    - europe
+    - apac
+    - emea
+    - amsterdam
+    - dublin
+    - stockholm
+    - zurich
+
+# ─────────────────────────────────────────────
+# Job boards
+# Wrong/outdated tokens just 404 silently and yield 0 jobs — harmless,
+# but verify new tokens by visiting the board URL in a browser first.
+# ─────────────────────────────────────────────
+boards:
+  greenhouse:
+    # boards-api.greenhouse.io/v1/boards/<token>/jobs
+    - assemblyai
+    - brex
+    - gusto
+    - lattice
+    - databricks
+    - fivetran
+    - hightouch
+    - anthropic
+    - scaleai
+    - togetherai
+    - coinbase
+    - figma
+    - asana
+    - lyft
+    - stripe
+    - airtable
+    - amplitude
+    - mixpanel
+    - vercel
+    - openai-2
+    - cohereai
+    - ripplingwork
+    - notionlabs
+    - retoolhq
+    - benchling
+    - anyscaleinc
+    - mistralai
+    - perplexityai
+    - elevenlabsio
+    - basetenhq
+    - deepgramai
+    - replitapp
+    - withpersona
+    - weightsandbiases
+    - huggingfaceinc
+    - getdbt
+    - getcensus
+    - airbyteinc
+    - doordash-2
+    - linearapp
+    - supabaseinc
+    - modalapp
+    - replicateai
+    - groqinc
+    - cerebrasai
+    - datastax
+    - pineconeio
+    - weaviateinc
+    - groqcloud
+    - langchainai
+    - vellumhq
+    - snowflake
+    - dbt-labs
+    - mongodb
+    - elastic
+    - confluent
+    - segment
+    - datarobot
+    - domino-data-lab
+    - weights-biases
+    - modal-labs
+
+  lever:
+    # api.lever.co/v0/postings/<token>?mode=json
+    # Verified live tokens (200 OK) as of 2026-06-30 — Bay Area-headquartered.
+    # Some show 0 open reqs today; that's normal, not a broken token.
+    - plaid
+    - wealthfront
+    - clari
+    - lever
+
+  ashby:
+    # api.ashbyhq.com/posting-api/job-board/<token>
+    # Verified live tokens (200 OK, returning real postings) as of 2026-06-30.
+    - ramp
+    - notion
+    - openai
+    - ashby
